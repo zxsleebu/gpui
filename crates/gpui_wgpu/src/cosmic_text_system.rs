@@ -782,6 +782,12 @@ impl CosmicTextSystemState {
             if glyph.glyph_id == 3 && is_emoji {
                 continue;
             }
+            // A character no installed font has (an emoji newer than the color font) lands
+            // on the fallback color font's .notdef, which has neither a bitmap nor an outline:
+            // swash fails on it, and again on every frame. Leave it out.
+            if glyph.glyph_id == 0 && is_emoji {
+                continue;
+            }
 
             let shaped_glyph = ShapedGlyph {
                 id: GlyphId(glyph.glyph_id as u32),

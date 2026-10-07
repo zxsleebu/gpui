@@ -54,6 +54,16 @@ pub struct ShapedGlyph {
 }
 
 impl LineLayout {
+    /// Whether the glyphs run left to right (x never falling), as left-to-right text does.
+    pub fn in_visual_order(&self) -> bool {
+        let mut last = px(f32::NEG_INFINITY);
+        self.runs.iter().flat_map(|run| &run.glyphs).all(|glyph| {
+            let rising = glyph.position.x >= last;
+            last = glyph.position.x;
+            rising
+        })
+    }
+
     /// The index for the character at the given x coordinate
     pub fn index_for_x(&self, x: Pixels) -> Option<usize> {
         if x >= self.width {
@@ -608,10 +618,24 @@ impl LineLayoutCache {
             drop(current_frame);
             let text = SharedString::from(text);
             let unwrapped_layout = self.layout_line::<&SharedString>(&text, font_size, runs, None);
-            let wrap_boundaries = if let Some(wrap_width) = wrap_width {
-                unwrapped_layout.compute_wrap_boundaries(text.as_ref(), wrap_width, max_lines)
-            } else {
-                SmallVec::new()
+            let (unwrapped_layout, wrap_boundaries) = match wrap_width {
+                Some(wrap_width) if !unwrapped_layout.in_visual_order() => self.wrap_bidi(
+                    &text,
+                    font_size,
+                    runs,
+                    &unwrapped_layout,
+                    wrap_width,
+                    max_lines,
+                ),
+                Some(wrap_width) => {
+                    let boundaries = unwrapped_layout.compute_wrap_boundaries(
+                        text.as_ref(),
+                        wrap_width,
+                        max_lines,
+                    );
+                    (unwrapped_layout, boundaries)
+                }
+                None => (unwrapped_layout, SmallVec::new()),
             };
             let layout = Arc::new(WrappedLineLayout {
                 unwrapped_layout,
@@ -634,6 +658,115 @@ impl LineLayoutCache {
 
             layout
         }
+    }
+
+    /// Right-to-left (or mixed) text comes back from the shaper in visual order, x running
+    /// backwards, which neither the wrapping (x rising glyph to glyph) nor the painter (a
+    /// new line starts at a boundary glyph, then steps glyph to glyph) can follow: wrapped,
+    /// such a line runs off to the left. Here the lines are found in logical order, from
+    /// each glyph's advance, then each line is shaped on its own (the shaper orders it) and
+    /// the lines are stitched back with x rising, each starting at its boundary glyph.
+    fn wrap_bidi(
+        &self,
+        text: &str,
+        font_size: Pixels,
+        runs: &[FontRun],
+        whole: &LineLayout,
+        wrap_width: Pixels,
+        max_lines: Option<usize>,
+    ) -> (Arc<LineLayout>, SmallVec<[WrapBoundary; 1]>) {
+        let by_x = |a: &Pixels, b: &Pixels| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+        // a glyph's advance: up to the next glyph on its right
+        let mut placed: Vec<(Pixels, usize)> = whole
+            .runs
+            .iter()
+            .flat_map(|run| run.glyphs.iter().map(|g| (g.position.x, g.index)))
+            .collect();
+        placed.sort_by(|a, b| by_x(&a.0, &b.0));
+        let mut advances: Vec<(usize, Pixels)> = placed
+            .iter()
+            .enumerate()
+            .map(|(i, &(x, index))| {
+                let next = placed.get(i + 1).map_or(whole.width, |p| p.0);
+                (index, next - x)
+            })
+            .collect();
+        advances.sort_by_key(|&(index, _)| index);
+
+        // greedy, in logical order, breaking before a word where one fits
+        let mut breaks: Vec<usize> = Vec::new();
+        let (mut x, mut line_x, mut line_start) = (px(0.), px(0.), 0);
+        let mut candidate: Option<(usize, Pixels)> = None;
+        let mut prev_ch = '\0';
+        for &(index, advance) in &advances {
+            let ch = text[index..].chars().next().unwrap_or(' ');
+            if prev_ch.is_whitespace() && !ch.is_whitespace() && index > line_start {
+                candidate = Some((index, x));
+            }
+            if x + advance - line_x > wrap_width && index > line_start && !ch.is_whitespace() {
+                if max_lines.is_some_and(|max| breaks.len() + 1 >= max) {
+                    break;
+                }
+                let (at, at_x) = candidate.take().unwrap_or((index, x));
+                breaks.push(at);
+                (line_start, line_x) = (at, at_x);
+            }
+            x += advance;
+            prev_ch = ch;
+        }
+
+        let mut stitched = LineLayout {
+            font_size,
+            len: text.len(),
+            ..Default::default()
+        };
+        let mut boundaries = SmallVec::new();
+        let starts = std::iter::once(0).chain(breaks.iter().copied());
+        let ends = breaks.iter().copied().chain(std::iter::once(text.len()));
+        for (start, end) in starts.zip(ends) {
+            // the space a line breaks after would show on its wrong side
+            let end = start + text[start..end].trim_end().len();
+            if end <= start {
+                continue;
+            }
+            let piece = self.platform_text_system.layout_line(
+                &text[start..end],
+                font_size,
+                &clip_runs(runs, start..end),
+            );
+            let mut glyphs: Vec<(FontId, ShapedGlyph)> = piece
+                .runs
+                .iter()
+                .flat_map(|run| run.glyphs.iter().map(move |g| (run.font_id, g.clone())))
+                .collect();
+            glyphs.sort_by(|a, b| by_x(&a.1.position.x, &b.1.position.x));
+            let first_line = stitched.runs.is_empty();
+            let offset = stitched.width;
+            for (n, (font_id, mut glyph)) in glyphs.into_iter().enumerate() {
+                glyph.index += start;
+                glyph.position.x += offset;
+                match stitched
+                    .runs
+                    .last_mut()
+                    .filter(|run| run.font_id == font_id)
+                {
+                    Some(run) => run.glyphs.push(glyph),
+                    None => stitched.runs.push(ShapedRun {
+                        font_id,
+                        glyphs: vec![glyph],
+                    }),
+                }
+                if n == 0 && !first_line {
+                    let run_ix = stitched.runs.len() - 1;
+                    let glyph_ix = stitched.runs[run_ix].glyphs.len() - 1;
+                    boundaries.push(WrapBoundary { run_ix, glyph_ix });
+                }
+            }
+            stitched.width += piece.width;
+            stitched.ascent = stitched.ascent.max(piece.ascent);
+            stitched.descent = stitched.descent.max(piece.descent);
+        }
+        (Arc::new(stitched), boundaries)
     }
 
     pub fn layout_line<Text>(
@@ -877,6 +1010,23 @@ fn apply_force_width_to_layout(layout: &mut LineLayout, force_width: Pixels) {
 pub struct FontRun {
     pub len: usize,
     pub font_id: FontId,
+}
+
+/// The runs covering `range` of the text, cut to it.
+fn clip_runs(runs: &[FontRun], range: Range<usize>) -> SmallVec<[FontRun; 2]> {
+    let mut clipped = SmallVec::new();
+    let mut at = 0;
+    for run in runs {
+        let (start, end) = (at.max(range.start), (at + run.len).min(range.end));
+        if start < end {
+            clipped.push(FontRun {
+                len: end - start,
+                font_id: run.font_id,
+            });
+        }
+        at += run.len;
+    }
+    clipped
 }
 
 trait AsCacheKeyRef {

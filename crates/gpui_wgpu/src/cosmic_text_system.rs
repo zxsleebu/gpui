@@ -1515,4 +1515,50 @@ mod tests {
         let spans = compute_run_spans("anything", 3, 0, primary, &fb, &covers);
         assert!(spans.is_empty());
     }
+
+    /// Wrapped right-to-left text stays inside its box: replays the painter (a boundary
+    /// glyph starts a line at the left edge, then x steps glyph to glyph) over the result.
+    #[test]
+    fn wrapped_rtl_text_stays_in_its_box() {
+        use gpui::px;
+        // the UI font has no Arabic: the system's fonts supply it, as in the app
+        let platform = CosmicTextSystem::new("IBM Plex Sans");
+        platform.add_fonts(vec![Cow::Borrowed(IBM_PLEX)]).unwrap();
+        let arabic = gpui::font("IBM Plex Sans");
+        if platform.font_id(&arabic).is_err() {
+            return;
+        }
+        let system = Arc::new(gpui::TextSystem::new(Arc::new(platform)));
+        let window = gpui::WindowTextSystem::new(system);
+        let text: SharedString =
+            "أنا من إندونيسيا وأحتاج إلى أصدقاء من كل مكان في العالم شكرا لكم جميعا".into();
+        let run = gpui::TextRun {
+            len: text.len(),
+            font: arabic,
+            color: gpui::black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let wrap = px(160.);
+        let lines = window
+            .shape_text(text.clone(), px(14.), &[run], Some(wrap), None)
+            .unwrap();
+        let line = &lines[0];
+        assert!(!line.wrap_boundaries.is_empty(), "the text should wrap");
+        let mut x = px(0.);
+        let mut prev = px(0.);
+        let mut wraps = line.wrap_boundaries.iter().peekable();
+        for (run_ix, run) in line.unwrapped_layout.runs.iter().enumerate() {
+            for (glyph_ix, glyph) in run.glyphs.iter().enumerate() {
+                x += glyph.position.x - prev;
+                if wraps.peek() == Some(&&gpui::WrapBoundary { run_ix, glyph_ix }) {
+                    wraps.next();
+                    x = px(0.);
+                }
+                prev = glyph.position.x;
+                assert!(x >= px(-0.5) && x <= wrap, "glyph painted at {x:?}");
+            }
+        }
+    }
 }

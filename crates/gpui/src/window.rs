@@ -4340,11 +4340,13 @@ impl Window {
 
         let element_bounds = bounds.scale(scale_factor);
         let transform_origin = match grows_from {
-            Some(origin) => element_bounds.origin
-                + point(
-                    element_bounds.size.width * origin.x,
-                    element_bounds.size.height * origin.y,
-                ),
+            Some(origin) => {
+                element_bounds.origin
+                    + point(
+                        element_bounds.size.width * origin.x,
+                        element_bounds.size.height * origin.y,
+                    )
+            }
             None => element_bounds.center(),
         };
         let fades = filter.fade_top + filter.fade_bottom + filter.fade_left + filter.fade_right;

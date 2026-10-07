@@ -1329,6 +1329,21 @@ vertex BackdropVertexOutput backdrop_vertex(
   return BackdropVertexOutput{device_position, backdrop_id, clip_distance};
 }
 
+// The backdrop's shape, drawn in across the middle by `waist` (see shaders.wgsl).
+float backdrop_sdf(float2 position, Backdrop backdrop) {
+  if (backdrop.waist <= 0.0) {
+    return quad_sdf(position, backdrop.bounds, backdrop.corner_radii);
+  }
+  float2 center = float2(backdrop.bounds.origin.x, backdrop.bounds.origin.y) +
+                  float2(backdrop.bounds.size.width, backdrop.bounds.size.height) / 2.0;
+  float2 from_center = position - center;
+  float spread = 0.22 * backdrop.bounds.size.height;
+  float bell = exp(-(from_center.y * from_center.y) / (spread * spread));
+  float squeeze = 1.0 - min(backdrop.waist, 0.9) * bell;
+  float2 widened = center + float2(from_center.x / squeeze, from_center.y);
+  return quad_sdf(widened, backdrop.bounds, backdrop.corner_radii) * squeeze;
+}
+
 // A backdrop replaces what it covers with the blurred copy of it rather than laying that copy
 // over it: `dst = mix(dst, blurred, k)`, k being the coverage times the instance's opacity.
 // Over an opaque frame the two are one picture, since a copy of alpha one hides whatever it
@@ -1351,8 +1366,10 @@ fragment float4 backdrop_fragment(
   float2 position = input.position.xy;
   float2 extent = float2(float(viewport_size->width), float(viewport_size->height));
   float4 sampled = source.sample(source_sampler, position / extent);
-  float distance = quad_sdf(position, backdrop.bounds, backdrop.corner_radii);
+  float distance = backdrop_sdf(position, backdrop);
   float coverage = saturate(0.5 - distance);
+  float4 tint = hsla_to_rgba(backdrop.tint);
+  sampled = sampled * (1.0 - tint.a) + float4(tint.rgb * tint.a, tint.a);
 
   return sampled * coverage * backdrop.opacity;
 }
@@ -1371,7 +1388,7 @@ fragment float4 backdrop_punch_fragment(
 
   Backdrop backdrop = backdrops[input.backdrop_id];
   float2 position = input.position.xy;
-  float distance = quad_sdf(position, backdrop.bounds, backdrop.corner_radii);
+  float distance = backdrop_sdf(position, backdrop);
   float coverage = saturate(0.5 - distance);
 
   return float4(0.0, 0.0, 0.0, coverage * backdrop.opacity);

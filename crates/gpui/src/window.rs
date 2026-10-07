@@ -4388,6 +4388,21 @@ impl Window {
         blur: Pixels,
         glass: Option<crate::Glass>,
     ) {
+        self.paint_drop(bounds, corner_radii, blur, glass, 0., crate::transparent_black());
+    }
+
+    /// [`Self::paint_glass_backdrop`] in a shape drawn in across its middle by `waist` (0 none,
+    /// 0.5 to half its width), a drop of liquid necking as it pulls apart, with `tint` painted
+    /// over the blurred copy inside the same shape (a quad over it couldn't follow the neck).
+    pub fn paint_drop(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        blur: Pixels,
+        glass: Option<crate::Glass>,
+        waist: f32,
+        tint: Hsla,
+    ) {
         self.invalidator.debug_assert_paint();
 
         let glass = glass.filter(|glass| glass.refraction > Pixels::ZERO || glass.highlight > 0.);
@@ -4412,6 +4427,8 @@ impl Window {
             bevel: glass.bevel.0 * scale_factor,
             dispersion: glass.dispersion,
             highlight: glass.highlight,
+            waist: waist.max(0.),
+            tint,
         });
     }
 

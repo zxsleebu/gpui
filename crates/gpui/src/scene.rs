@@ -1165,6 +1165,10 @@ pub struct Backdrop {
     pub bevel: f32,
     pub dispersion: f32,
     pub highlight: f32,
+    /// How far the shape draws in at its middle, across: 0 none, 0.5 to half its width.
+    pub waist: f32,
+    /// Painted over the blurred copy, inside the same shape (transparent for none).
+    pub tint: Hsla,
 }
 
 impl From<Backdrop> for Primitive {

@@ -1382,6 +1382,8 @@ struct Backdrop {
     bevel: f32,
     dispersion: f32,
     highlight: f32,
+    waist: f32,
+    tint: Hsla,
 }
 
 struct BackdropVarying {
@@ -1419,14 +1421,37 @@ fn fs_backdrop(input: BackdropVarying) -> @location(0) vec4<f32> {
 
     let backdrop = load_backdrop(input.backdrop_id);
     let position = input.position.xy;
-    let distance = quad_sdf(position, backdrop.bounds, backdrop.corner_radii);
+    let distance = backdrop_sdf(position, backdrop);
     let coverage = saturate(0.5 - distance);
+    var seen: vec4<f32>;
     if (backdrop.refraction <= 0.0 && backdrop.highlight <= 0.0) {
-        let sampled = textureSample(t_sprite, s_sprite, position / globals.viewport_size);
-        return sampled * coverage * backdrop.opacity;
+        seen = textureSample(t_sprite, s_sprite, position / globals.viewport_size);
+    } else {
+        seen = glass_backdrop(position, distance, backdrop);
     }
+    return tinted(seen, backdrop.tint) * coverage * backdrop.opacity;
+}
 
-    return glass_backdrop(position, distance, backdrop) * coverage * backdrop.opacity;
+// The tint laid over the blurred copy, premultiplied, as a quad of it painted on top would be.
+fn tinted(seen: vec4<f32>, tint: Hsla) -> vec4<f32> {
+    let color = hsla_to_rgba(tint);
+    return seen * (1.0 - color.a) + vec4<f32>(color.rgb * color.a, color.a);
+}
+
+// The backdrop's shape: its rounded rectangle, drawn in across the middle by `waist` on a
+// bell curve, as a drop of liquid necks while it pulls apart. The distance is scaled back so
+// the edge stays a pixel wide.
+fn backdrop_sdf(position: vec2<f32>, backdrop: Backdrop) -> f32 {
+    if (backdrop.waist <= 0.0) {
+        return quad_sdf(position, backdrop.bounds, backdrop.corner_radii);
+    }
+    let center = backdrop.bounds.origin + backdrop.bounds.size / 2.0;
+    let from_center = position - center;
+    let spread = 0.22 * backdrop.bounds.size.y;
+    let bell = exp(-(from_center.y * from_center.y) / (spread * spread));
+    let squeeze = 1.0 - min(backdrop.waist, 0.9) * bell;
+    let widened = center + vec2<f32>(from_center.x / squeeze, from_center.y);
+    return quad_sdf(widened, backdrop.bounds, backdrop.corner_radii) * squeeze;
 }
 
 /// The hole the blurred copy lands in: alpha alone, blended so the destination keeps `1 - k`
@@ -1439,7 +1464,7 @@ fn fs_backdrop_punch(input: BackdropVarying) -> @location(0) vec4<f32> {
 
     let backdrop = load_backdrop(input.backdrop_id);
     let position = input.position.xy;
-    let distance = quad_sdf(position, backdrop.bounds, backdrop.corner_radii);
+    let distance = backdrop_sdf(position, backdrop);
     let coverage = saturate(0.5 - distance);
 
     return vec4<f32>(0.0, 0.0, 0.0, coverage * backdrop.opacity);
@@ -1458,10 +1483,10 @@ fn fs_backdrop_punch(input: BackdropVarying) -> @location(0) vec4<f32> {
 // Outward unit normal of the rounded rectangle at `position`, from the distance field.
 fn glass_normal(position: vec2<f32>, backdrop: Backdrop) -> vec2<f32> {
     let e = 1.0;
-    let dx = quad_sdf(position + vec2<f32>(e, 0.0), backdrop.bounds, backdrop.corner_radii)
-        - quad_sdf(position - vec2<f32>(e, 0.0), backdrop.bounds, backdrop.corner_radii);
-    let dy = quad_sdf(position + vec2<f32>(0.0, e), backdrop.bounds, backdrop.corner_radii)
-        - quad_sdf(position - vec2<f32>(0.0, e), backdrop.bounds, backdrop.corner_radii);
+    let dx = backdrop_sdf(position + vec2<f32>(e, 0.0), backdrop)
+        - backdrop_sdf(position - vec2<f32>(e, 0.0), backdrop);
+    let dy = backdrop_sdf(position + vec2<f32>(0.0, e), backdrop)
+        - backdrop_sdf(position - vec2<f32>(0.0, e), backdrop);
     let gradient = vec2<f32>(dx, dy);
     let size = length(gradient);
     if (size < 1e-5) {

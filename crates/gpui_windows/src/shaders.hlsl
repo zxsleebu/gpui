@@ -1313,6 +1313,7 @@ struct Backdrop {
     float highlight;
     float waist;
     Hsla tint;
+    uint pad_end;
 };
 
 // The backdrop's shape, drawn in across the middle by `waist` (see shaders.wgsl).

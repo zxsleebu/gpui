@@ -1169,7 +1169,14 @@ pub struct Backdrop {
     pub waist: f32,
     /// Painted over the blurred copy, inside the same shape (transparent for none).
     pub tint: Hsla,
+    /// Rounds the size up to the shaders' alignment (8, for `Bounds`): without it every
+    /// backdrop after the first is read from the wrong place in the instance buffer.
+    pub pad_end: u32,
 }
+
+// The shaders align `Backdrop` to 8 bytes (its `Bounds`); an instance buffer of a size off
+// that stride reads every backdrop after the first from the wrong place.
+const _: () = assert!(std::mem::size_of::<Backdrop>() % 8 == 0);
 
 impl From<Backdrop> for Primitive {
     fn from(backdrop: Backdrop) -> Self {

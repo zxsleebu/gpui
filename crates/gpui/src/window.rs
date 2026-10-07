@@ -4429,6 +4429,7 @@ impl Window {
             highlight: glass.highlight,
             waist: waist.max(0.),
             tint,
+            pad_end: 0,
         });
     }
 

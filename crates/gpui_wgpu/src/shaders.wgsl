@@ -1427,6 +1427,7 @@ struct Backdrop {
     highlight: f32,
     waist: f32,
     tint: Hsla,
+    pad_end: u32,
 }
 
 struct BackdropVarying {

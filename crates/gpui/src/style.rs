@@ -294,6 +294,9 @@ pub struct Style {
     /// Blur whatever is painted behind this element
     pub backdrop_blur: Option<Pixels>,
 
+    /// See what is behind this element through a lens of glass: its rim bends the picture
+    pub backdrop_glass: Option<Glass>,
+
     /// Draw this element and its subtree offscreen, and put the result through these effects
     pub filter: LayerFilter,
 
@@ -436,6 +439,23 @@ pub enum TextAlign {
 
     /// Align the text to the right of the element
     Right,
+}
+
+/// The lens a backdrop is seen through, after the "liquid glass" look: a slab whose edge
+/// curves down like a rounded bevel. Light passing the curve bends, so the rim pulls in
+/// the picture from further inside, squeezed and magnified, while the flat middle shows it
+/// as it is. Only the WGPU renderer (Linux, Windows via Vulkan aside) draws the lens; the
+/// others show the plain backdrop.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Glass {
+    /// How far the very edge displaces the picture, inward.
+    pub refraction: Pixels,
+    /// How far in from the edge the surface curves; flat beyond it.
+    pub bevel: Pixels,
+    /// How much further red bends than blue, as a share of the displacement (0.0 to ~0.3).
+    pub dispersion: f32,
+    /// Strength of the light the rim catches, from the top left (0.0 to 1.0).
+    pub highlight: f32,
 }
 
 /// A shadow painted under text, like one entry of the CSS `text-shadow` property. It follows
@@ -825,8 +845,13 @@ impl Style {
 
         window.paint_drop_shadows(bounds, corner_radii, &self.box_shadow);
 
-        if let Some(blur) = self.backdrop_blur {
-            window.paint_backdrop(bounds, corner_radii, blur);
+        if self.backdrop_blur.is_some() || self.backdrop_glass.is_some() {
+            window.paint_glass_backdrop(
+                bounds,
+                corner_radii,
+                self.backdrop_blur.unwrap_or_default(),
+                self.backdrop_glass,
+            );
         }
 
         let background_color = self.background.as_ref().and_then(Fill::color);
@@ -926,6 +951,7 @@ impl Default for Style {
             corner_radii: Corners::default(),
             box_shadow: Default::default(),
             backdrop_blur: None,
+            backdrop_glass: None,
             filter: LayerFilter::default(),
             text: TextStyleRefinement::default(),
             mouse_cursor: None,

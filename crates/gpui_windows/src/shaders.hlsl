@@ -1306,6 +1306,11 @@ struct Backdrop {
     Bounds bounds;
     Bounds content_mask;
     Corners corner_radii;
+    // The glass lens; only the WGPU renderer draws it so far.
+    float refraction;
+    float bevel;
+    float dispersion;
+    float highlight;
 };
 
 struct BackdropVertexOutput {

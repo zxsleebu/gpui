@@ -1378,6 +1378,10 @@ struct Backdrop {
     bounds: Bounds,
     content_mask: Bounds,
     corner_radii: Corners,
+    refraction: f32,
+    bevel: f32,
+    dispersion: f32,
+    highlight: f32,
 }
 
 struct BackdropVarying {
@@ -1415,11 +1419,14 @@ fn fs_backdrop(input: BackdropVarying) -> @location(0) vec4<f32> {
 
     let backdrop = load_backdrop(input.backdrop_id);
     let position = input.position.xy;
-    let sampled = textureSample(t_sprite, s_sprite, position / globals.viewport_size);
     let distance = quad_sdf(position, backdrop.bounds, backdrop.corner_radii);
     let coverage = saturate(0.5 - distance);
+    if (backdrop.refraction <= 0.0 && backdrop.highlight <= 0.0) {
+        let sampled = textureSample(t_sprite, s_sprite, position / globals.viewport_size);
+        return sampled * coverage * backdrop.opacity;
+    }
 
-    return sampled * coverage * backdrop.opacity;
+    return glass_backdrop(position, distance, backdrop) * coverage * backdrop.opacity;
 }
 
 /// The hole the blurred copy lands in: alpha alone, blended so the destination keeps `1 - k`
@@ -1436,6 +1443,63 @@ fn fs_backdrop_punch(input: BackdropVarying) -> @location(0) vec4<f32> {
     let coverage = saturate(0.5 - distance);
 
     return vec4<f32>(0.0, 0.0, 0.0, coverage * backdrop.opacity);
+}
+
+// --- glass --- //
+
+// The lens is a flat slab whose edge curves down over `bevel` like a quarter circle. A ray
+// looking through the curve bends toward the thick middle, so the rim shows the picture from
+// further in, squeezed against the edge, while the flat face shows it as it is. The shape of
+// the displacement and of the glint along the rim follow whynotmake-it/flutter_liquid_glass
+// (Apache-2.0), whose numbers are fitted to Apple's material: displacement
+// `amount * (1 - sqrt(1 - x^2))`, x running from 0 where the bevel meets the face to 1 at the
+// rim, which joins the face without a crease.
+
+// Outward unit normal of the rounded rectangle at `position`, from the distance field.
+fn glass_normal(position: vec2<f32>, backdrop: Backdrop) -> vec2<f32> {
+    let e = 1.0;
+    let dx = quad_sdf(position + vec2<f32>(e, 0.0), backdrop.bounds, backdrop.corner_radii)
+        - quad_sdf(position - vec2<f32>(e, 0.0), backdrop.bounds, backdrop.corner_radii);
+    let dy = quad_sdf(position + vec2<f32>(0.0, e), backdrop.bounds, backdrop.corner_radii)
+        - quad_sdf(position - vec2<f32>(0.0, e), backdrop.bounds, backdrop.corner_radii);
+    let gradient = vec2<f32>(dx, dy);
+    let size = length(gradient);
+    if (size < 1e-5) {
+        return vec2<f32>(0.0);
+    }
+    return gradient / size;
+}
+
+fn glass_backdrop(position: vec2<f32>, distance: f32, backdrop: Backdrop) -> vec4<f32> {
+    let half_minor = 0.5 * min(backdrop.bounds.size.x, backdrop.bounds.size.y);
+    // a bevel past half the short side would flip the displacement at the centre line
+    let bevel = max(min(backdrop.bevel, 0.5 * half_minor), 1.0);
+    let amount = min(backdrop.refraction, half_minor);
+    let inside = max(-distance, 0.0);
+    let x = 1.0 - saturate(inside / bevel);
+    let normal = glass_normal(position, backdrop);
+
+    // toward the interior: the blurred copy only exists under the shape
+    let offset = -normal * (amount * (1.0 - sqrt(max(1.0 - x * x, 0.0))));
+    let at = position / globals.viewport_size;
+    let step = offset / globals.viewport_size;
+    let green = textureSample(t_sprite, s_sprite, at + step);
+    var color = green;
+    if (backdrop.dispersion > 0.0) {
+        let spread = 0.5 * backdrop.dispersion;
+        let red = textureSample(t_sprite, s_sprite, at + step * (1.0 + spread));
+        let blue = textureSample(t_sprite, s_sprite, at + step * (1.0 - spread));
+        color = vec4<f32>(red.r, green.g, blue.b, green.a);
+    }
+
+    // a thin glint along the rim where it faces the light (top left) or faces away from it,
+    // with a faint bleed inward
+    let light = normalize(vec2<f32>(-1.0, -1.0));
+    let lobe = 1.0 - abs(dot(normal, vec2<f32>(-light.y, light.x)));
+    let profile = saturate(1.0 - inside / 1.2) + 0.21 * saturate(1.0 - inside / 4.8);
+    let glint = saturate(backdrop.highlight * 0.252 * lobe * profile);
+    let lit = min(color.rgb * 1.6 + vec3<f32>(0.35) * color.a, vec3<f32>(color.a));
+    return vec4<f32>(mix(color.rgb, lit, glint), color.a);
 }
 
 // --- blur --- //

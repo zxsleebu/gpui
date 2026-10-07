@@ -1160,6 +1160,11 @@ pub struct Backdrop {
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
+    /// The lens (see [`crate::Glass`]), in scaled pixels; all zero for a flat backdrop.
+    pub refraction: f32,
+    pub bevel: f32,
+    pub dispersion: f32,
+    pub highlight: f32,
 }
 
 impl From<Backdrop> for Primitive {

@@ -1166,6 +1166,8 @@ pub struct Window {
     pub(crate) rendered_entity_stack: Vec<EntityId>,
     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
     pub(crate) snap_offsets: bool,
+    /// Off inside [`Window::with_subpixel_paint`]: quads and backdrops keep fractional bounds.
+    pub(crate) snap_paint: bool,
     pub(crate) element_opacity: f32,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
@@ -1867,6 +1869,7 @@ impl Window {
             rendered_entity_stack: Vec::new(),
             element_offset_stack: Vec::new(),
             snap_offsets: true,
+            snap_paint: true,
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,
             requested_autoscroll: None,
@@ -2765,6 +2768,9 @@ impl Window {
     #[inline]
     fn snap_bounds(&self, bounds: Bounds<Pixels>) -> Bounds<ScaledPixels> {
         let scale_factor = self.scale_factor();
+        if !self.snap_paint {
+            return bounds.scale(scale_factor);
+        }
         let left = round_to_device_pixel(bounds.left().0, scale_factor);
         let top = round_to_device_pixel(bounds.top().0, scale_factor);
         let right = round_to_device_pixel(bounds.right().0, scale_factor).max(left);
@@ -3773,6 +3779,29 @@ impl Window {
         result
     }
 
+    /// Paints quads and backdrops at the fractional bounds they are given instead of rounding
+    /// their edges to the device pixel grid. Layout always lands on whole pixels, so something
+    /// a spring moves, drawn on whole pixels, walks in one-pixel steps and settles with a
+    /// visible tick when the spring lets go; painted from a canvas at the spring's exact value
+    /// inside this, it glides, and the antialiased edges of the shaders blend the fraction.
+    /// Edges come out a little soft while off the grid. This method should only be called
+    /// during the paint phase of element drawing.
+    pub fn with_subpixel_paint<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.invalidator.debug_assert_paint();
+
+        let was = std::mem::replace(&mut self.snap_paint, false);
+        let result = f(self);
+        self.snap_paint = was;
+        result
+    }
+
+    /// Multiplies the opacity of whatever `f` paints, for elements that paint by hand (a canvas)
+    /// and want to fade like a styled one. This method should only be called during the paint
+    /// or prepaint phase of element drawing.
+    pub fn with_opacity<R>(&mut self, opacity: f32, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.with_element_opacity(Some(opacity), f)
+    }
+
     pub(crate) fn with_element_opacity<R>(
         &mut self,
         opacity: Option<f32>,
@@ -4343,13 +4372,32 @@ impl Window {
         corner_radii: Corners<Pixels>,
         blur: Pixels,
     ) {
+        self.paint_glass_backdrop(bounds, corner_radii, blur, None);
+    }
+
+    /// Blur whatever has already been painted behind the given bounds, seen through a lens of
+    /// glass that bends it at the rim.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_glass_backdrop(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        blur: Pixels,
+        glass: Option<crate::Glass>,
+    ) {
         self.invalidator.debug_assert_paint();
 
-        if blur <= Pixels::ZERO {
+        let glass = glass.filter(|glass| glass.refraction > Pixels::ZERO || glass.highlight > 0.);
+        if blur <= Pixels::ZERO && glass.is_none() {
             return;
         }
+        // A lens with no blur still reads the copy of the frame the blur passes make; the
+        // narrowest of them is as good as the frame itself.
+        let blur = blur.max(px(0.5));
 
         let scale_factor = self.scale_factor();
+        let glass = glass.unwrap_or_default();
         self.next_frame.scene.insert_primitive(Backdrop {
             order: 0,
             pad: 0,
@@ -4358,6 +4406,10 @@ impl Window {
             bounds: self.snap_bounds(bounds),
             content_mask: self.snapped_content_mask(),
             corner_radii: corner_radii.scale(scale_factor),
+            refraction: glass.refraction.0 * scale_factor,
+            bevel: glass.bevel.0 * scale_factor,
+            dispersion: glass.dispersion,
+            highlight: glass.highlight,
         });
     }
 

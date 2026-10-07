@@ -592,6 +592,13 @@ pub trait Styled: Sized {
         self
     }
 
+    /// Shows whatever is painted behind this element through a lens of glass, bent at its
+    /// rim (see [`crate::Glass`]). Combines with [`Self::backdrop_blur`] for frosted glass.
+    fn backdrop_glass(mut self, glass: crate::Glass) -> Self {
+        self.style().backdrop_glass = Some(glass);
+        self
+    }
+
     /// Sets the font weight of this element
     ///
     /// This value cascades to its child elements.

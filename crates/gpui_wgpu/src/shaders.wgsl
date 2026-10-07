@@ -363,10 +363,50 @@ fn quad_sdf(point: vec2<f32>, bounds: Bounds, corner_radii: Corners) -> f32 {
     let half_size = bounds.size / 2.0;
     let center = bounds.origin + half_size;
     let center_to_point = point - center;
-    let corner_radius = pick_corner_radius(center_to_point, corner_radii);
+    let corner_radius = squircle_reach(pick_corner_radius(center_to_point, corner_radii), half_size);
     let corner_to_point = abs(center_to_point) - half_size;
-    let corner_center_to_point = corner_to_point + corner_radius;
-    return quad_sdf_impl(corner_center_to_point, corner_radius);
+    let corner_center_to_point = corner_to_point + corner_radius.x;
+    return corner_sdf(corner_center_to_point, corner_radius);
+}
+
+// --- squircles --- //
+
+// Rounded corners are drawn as squircles, the continuous curve of Apple's corners: a
+// superellipse of power 4, which leaves the straight edge with no jump in curvature, over a
+// reach longer than the radius asked for (the curve starts further along the edge, as Figma's
+// corner smoothing does), so it reads as about as round. A corner whose radius is half the
+// shorter side (a circle, a pill) stays a circular arc.
+const SQUIRCLE_REACH: f32 = 1.45;
+
+// The corner's reach, and 1 for a squircle or 0 for a plain arc.
+fn squircle_reach(radius: f32, half_size: vec2<f32>) -> vec2<f32> {
+    let half_minor = min(half_size.x, half_size.y);
+    if (radius <= 0.0 || radius >= half_minor - 0.5) {
+        return vec2<f32>(radius, 0.0);
+    }
+    return vec2<f32>(min(radius * SQUIRCLE_REACH, half_minor), 1.0);
+}
+
+// Signed distance to the corner (`corner.x` its reach, `corner.y` whether a squircle) from the
+// point, as `quad_sdf_impl` takes it. The superellipse's level set is rescaled by its gradient,
+// so the edge stays about a pixel wide.
+fn corner_sdf(corner_center_to_point: vec2<f32>, corner: vec2<f32>) -> f32 {
+    if (corner.y <= 0.0) {
+        return quad_sdf_impl(corner_center_to_point, corner.x);
+    }
+    let reach = corner.x;
+    if (corner_center_to_point.x <= 0.0 && corner_center_to_point.y <= 0.0) {
+        return max(corner_center_to_point.x, corner_center_to_point.y) - reach;
+    }
+    let a = max(corner_center_to_point, vec2<f32>(0.0));
+    let a2 = a * a;
+    let norm = sqrt(sqrt(a2.x * a2.x + a2.y * a2.y));
+    if (norm < 1e-4) {
+        return -reach;
+    }
+    let u = a / norm;
+    let slope = length(u * u * u);
+    return (norm - reach) / max(slope, 0.5);
 }
 
 fn quad_sdf_impl(corner_center_to_point: vec2<f32>, corner_radius: f32) -> f32 {
@@ -620,9 +660,12 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
     // the point into the bottom right quadrant. Both components are <= 0.
     let corner_to_point = abs(center_to_point) - half_size;
 
+    // A corner smaller than the shape is a squircle, reaching further along its edges.
+    let corner = squircle_reach(corner_radius, half_size);
+
     // Vector from the point to the center of the rounded corner's circle, also
     // mirrored into bottom right quadrant.
-    let corner_center_to_point = corner_to_point + corner_radius;
+    let corner_center_to_point = corner_to_point + corner.x;
 
     // Whether the nearest point on the border is rounded
     let is_near_rounded_corner =
@@ -655,7 +698,7 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
 
     // Signed distance of the point to the outside edge of the quad's border. It
     // is positive outside this edge, and negative inside.
-    let outer_sdf = quad_sdf_impl(corner_center_to_point, corner_radius);
+    let outer_sdf = corner_sdf(corner_center_to_point, corner);
 
     // Approximate signed distance of the point to the inside edge of the quad's
     // border. It is negative outside this edge (within the border), and
@@ -677,7 +720,7 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
         // Fast path for circular inner edge.
         inner_sdf = -(outer_sdf + reduced_border.x);
     } else {
-        let ellipse_radii = max(vec2<f32>(0.0), corner_radius - reduced_border);
+        let ellipse_radii = max(vec2<f32>(0.0), corner.x - reduced_border);
         inner_sdf = quarter_ellipse_sdf(corner_center_to_point, ellipse_radii);
     }
 

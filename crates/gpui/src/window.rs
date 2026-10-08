@@ -1019,6 +1019,82 @@ pub(crate) struct PaintIndex {
     line_layout_index: LineLayoutIndex,
 }
 
+impl PrepaintStateIndex {
+    /// Where this index is once the part of a frame starting at `from` is copied to `to`
+    /// (a reused view's part moves as a whole: every list in it shifts by its own offset).
+    pub(crate) fn moved(&self, from: &Self, to: &Self) -> Self {
+        let moved = |at: usize, from: usize, to: usize| at - from + to;
+        PrepaintStateIndex {
+            hitboxes_index: moved(self.hitboxes_index, from.hitboxes_index, to.hitboxes_index),
+            tooltips_index: moved(self.tooltips_index, from.tooltips_index, to.tooltips_index),
+            deferred_draws_index: moved(
+                self.deferred_draws_index,
+                from.deferred_draws_index,
+                to.deferred_draws_index,
+            ),
+            dispatch_tree_index: moved(
+                self.dispatch_tree_index,
+                from.dispatch_tree_index,
+                to.dispatch_tree_index,
+            ),
+            accessed_element_states_index: moved(
+                self.accessed_element_states_index,
+                from.accessed_element_states_index,
+                to.accessed_element_states_index,
+            ),
+            line_layout_index: self
+                .line_layout_index
+                .moved(&from.line_layout_index, &to.line_layout_index),
+        }
+    }
+
+    pub(crate) fn accessed_element_states_index(&self) -> usize {
+        self.accessed_element_states_index
+    }
+}
+
+impl PaintIndex {
+    /// See [`PrepaintStateIndex::moved`].
+    pub(crate) fn moved(&self, from: &Self, to: &Self) -> Self {
+        let moved = |at: usize, from: usize, to: usize| at - from + to;
+        PaintIndex {
+            scene_index: moved(self.scene_index, from.scene_index, to.scene_index),
+            mouse_listeners_index: moved(
+                self.mouse_listeners_index,
+                from.mouse_listeners_index,
+                to.mouse_listeners_index,
+            ),
+            input_handlers_index: moved(
+                self.input_handlers_index,
+                from.input_handlers_index,
+                to.input_handlers_index,
+            ),
+            cursor_styles_index: moved(
+                self.cursor_styles_index,
+                from.cursor_styles_index,
+                to.cursor_styles_index,
+            ),
+            accessed_element_states_index: moved(
+                self.accessed_element_states_index,
+                from.accessed_element_states_index,
+                to.accessed_element_states_index,
+            ),
+            tab_handle_index: moved(
+                self.tab_handle_index,
+                from.tab_handle_index,
+                to.tab_handle_index,
+            ),
+            line_layout_index: self
+                .line_layout_index
+                .moved(&from.line_layout_index, &to.line_layout_index),
+        }
+    }
+
+    pub(crate) fn accessed_element_states_index(&self) -> usize {
+        self.accessed_element_states_index
+    }
+}
+
 impl Frame {
     pub(crate) fn new(dispatch_tree: DispatchTree) -> Self {
         Frame {
@@ -3609,6 +3685,27 @@ impl Window {
         );
     }
 
+    /// Calls `f` on each state of type `S` whose key the next frame noted at `keys` (the
+    /// part of it just reused) and that is still where the last frame left it: the states of
+    /// whatever was reused with that part and not drawn this frame.
+    pub(crate) fn update_reused_states<S: 'static>(
+        &mut self,
+        keys: Range<usize>,
+        mut f: impl FnMut(&mut S),
+    ) {
+        let type_id = TypeId::of::<S>();
+        for key in &self.next_frame.accessed_element_states[keys] {
+            if key.1 != type_id {
+                continue;
+            }
+            if let Some(state) = self.rendered_frame.element_states.get_mut(key)
+                && let Some(Some(state)) = state.inner.downcast_mut::<Option<S>>()
+            {
+                f(state);
+            }
+        }
+    }
+
     pub(crate) fn paint_index(&self) -> PaintIndex {
         PaintIndex {
             scene_index: self.next_frame.scene.len(),
@@ -4388,7 +4485,14 @@ impl Window {
         blur: Pixels,
         glass: Option<crate::Glass>,
     ) {
-        self.paint_drop(bounds, corner_radii, blur, glass, 0., crate::transparent_black());
+        self.paint_drop(
+            bounds,
+            corner_radii,
+            blur,
+            glass,
+            0.,
+            crate::transparent_black(),
+        );
     }
 
     /// [`Self::paint_glass_backdrop`] in a shape drawn in across its middle by `waist` (0 none,

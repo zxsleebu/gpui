@@ -396,10 +396,23 @@ impl<V: View> Element for ViewElement<V> {
                         {
                             let prepaint_start = window.prepaint_index();
                             window.note_view_cache(true);
+                            let old = element_state.prepaint_range.start.clone();
                             window.reuse_prepaint(element_state.prepaint_range.clone());
                             cx.entities
                                 .extend_accessed(&element_state.accessed_entities);
                             let prepaint_end = window.prepaint_index();
+                            // the views cached inside this one moved with it: where they were
+                            // drawn has to follow, for when this one renders again and they
+                            // are reused on their own
+                            window.update_reused_states::<ViewElementState>(
+                                prepaint_start.accessed_element_states_index()
+                                    ..prepaint_end.accessed_element_states_index(),
+                                |inner| {
+                                    let range = &mut inner.prepaint_range;
+                                    *range = range.start.moved(&old, &prepaint_start)
+                                        ..range.end.moved(&old, &prepaint_start);
+                                },
+                            );
                             element_state.prepaint_range = prepaint_start..prepaint_end;
 
                             return (None, element_state);
@@ -479,7 +492,18 @@ impl<V: View> Element for ViewElement<V> {
                             if let Some(element) = element {
                                 element.paint(window, cx);
                             } else {
+                                let old = element_state.paint_range.start.clone();
                                 window.reuse_paint(element_state.paint_range.clone());
+                                let end = window.paint_index();
+                                window.update_reused_states::<ViewElementState>(
+                                    paint_start.accessed_element_states_index()
+                                        ..end.accessed_element_states_index(),
+                                    |inner| {
+                                        let range = &mut inner.paint_range;
+                                        *range = range.start.moved(&old, &paint_start)
+                                            ..range.end.moved(&old, &paint_start);
+                                    },
+                                );
                             }
 
                             let paint_end = window.paint_index();
@@ -528,7 +552,10 @@ mod tests {
     impl Render for Leaf {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             self.renders.set(self.renders.get() + 1);
-            div().size_full()
+            div()
+                .size_full()
+                .child("leaf")
+                .child(div().id("leaf-hit").h(px(10.)).hover(|s| s))
         }
     }
 
@@ -550,15 +577,28 @@ mod tests {
 
     struct Root {
         middle: Entity<Middle>,
+        /// Lines drawn before the cached views, to move them along the frame's buffers.
+        extra: usize,
     }
 
     impl Render for Root {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            div().size_full().child(
-                self.middle
-                    .clone()
-                    .cached(StyleRefinement::default().size_full()),
-            )
+            div()
+                .size_full()
+                .children((0..self.extra).map(|i| {
+                    div()
+                        .id(("extra", i))
+                        .hover(|s| s)
+                        .child(format!("line {i}"))
+                }))
+                .child(
+                    // out of the flow: the lines above move it along the frame, not on screen
+                    div().absolute().top_0().left_0().size_full().child(
+                        self.middle
+                            .clone()
+                            .cached(StyleRefinement::default().size_full()),
+                    ),
+                )
         }
     }
 
@@ -570,7 +610,7 @@ mod tests {
         let window = cx.open_window(size(px(800.), px(600.)), move |_, cx| {
             let leaf = cx.new(|_| Leaf { renders: l });
             let middle = cx.new(|_| Middle { leaf, renders: m });
-            Root { middle }
+            Root { middle, extra: 0 }
         });
         cx.run_until_parked();
         assert_eq!((middle_renders.get(), leaf_renders.get()), (1, 1));
@@ -595,5 +635,50 @@ mod tests {
         window.update(cx, |_, window, _| window.refresh()).unwrap();
         cx.run_until_parked();
         assert_eq!((middle_renders.get(), leaf_renders.get()), (4, 3));
+    }
+
+    /// The outer view is reused while what comes before it changes (its part of the frame
+    /// moves), then renders again with the inner one reused: the inner one's recorded part
+    /// of the frame has to have moved with it.
+    #[gpui::test]
+    fn test_nested_cached_view_reused_after_its_parent_moved(cx: &mut TestAppContext) {
+        let (middle_renders, leaf_renders) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+        let (m, l) = (middle_renders.clone(), leaf_renders.clone());
+        let window = cx.open_window(size(px(800.), px(600.)), move |_, cx| {
+            let leaf = cx.new(|_| Leaf { renders: l });
+            let middle = cx.new(|_| Middle { leaf, renders: m });
+            Root { middle, extra: 5 }
+        });
+        cx.run_until_parked();
+        let hitboxes = |cx: &mut TestAppContext| {
+            window
+                .update(cx, |_, window, _| window.rendered_frame.hitboxes.len())
+                .unwrap()
+        };
+        let full = hitboxes(cx);
+
+        for extra in [0, 3, 8] {
+            // the root renders, the middle (and the leaf in it) is reused, moved
+            window
+                .update(cx, |root, _, cx| {
+                    root.extra = extra;
+                    cx.notify();
+                })
+                .unwrap();
+            cx.run_until_parked();
+            // the middle renders, the leaf is reused from where it was last frame
+            window
+                .update(cx, |root, _, cx| {
+                    root.middle.update(cx, |_, cx| cx.notify())
+                })
+                .unwrap();
+            cx.run_until_parked();
+            assert_eq!(hitboxes(cx), full - 5 + extra);
+        }
+        assert_eq!(leaf_renders.get(), 1);
+
+        window.update(cx, |_, window, _| window.refresh()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(hitboxes(cx), full - 5 + 8);
     }
 }

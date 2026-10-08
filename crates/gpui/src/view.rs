@@ -7,7 +7,6 @@ use crate::{Empty, Window};
 use anyhow::Result;
 use collections::FxHashSet;
 use refineable::Refineable;
-use std::mem;
 use std::{any::TypeId, fmt, ops::Range};
 
 /// A dynamically-typed view handle that can be downcast to a specific `Entity<V>`.
@@ -34,8 +33,12 @@ impl AnyView {
     /// Embed this view as a cached [`ViewElement`] laid out at `style`.
     ///
     /// The rendered subtree is recycled from the previous frame unless
-    /// [Context::notify] was called on the backing entity since it was rendered
-    /// (or [Window::refresh] is called, which ignores caching).
+    /// [Context::notify] was called on the backing entity since it was rendered,
+    /// its bounds, content mask or text style changed, or [Window::refresh] is
+    /// called, which ignores caching. That holds inside another cached view too:
+    /// a parent rendering again doesn't render its cached children again. Whatever
+    /// the parent paints around it by inheritance (an opacity, say) is not part of
+    /// the key, so it must not change while the child is recycled.
     pub fn cached(self, style: StyleRefinement) -> ViewElement<AnyView> {
         ViewElement::new(self).cached(style)
     }
@@ -405,7 +408,9 @@ impl<V: View> Element for ViewElement<V> {
                         window.note_view_cache(false);
                         window.note_notified(entity_id, bounds);
                         window.note_repaint(entity_id, bounds);
-                        let refreshing = mem::replace(&mut window.refreshing, true);
+                        // Cached views below are left to their own keys: forcing them to
+                        // render again with this one made nested caching a no-op (a list
+                        // in a panel laid out on every frame of a video beside it).
                         let prepaint_start = window.prepaint_index();
                         let (mut element, accessed_entities) = cx.detect_accessed_entities(|cx| {
                             let mut element = self
@@ -420,7 +425,6 @@ impl<V: View> Element for ViewElement<V> {
                         });
 
                         let prepaint_end = window.prepaint_index();
-                        window.refreshing = refreshing;
 
                         (
                             Some(element),
@@ -473,9 +477,7 @@ impl<V: View> Element for ViewElement<V> {
                             let paint_start = window.paint_index();
 
                             if let Some(element) = element {
-                                let refreshing = mem::replace(&mut window.refreshing, true);
                                 element.paint(window, cx);
-                                window.refreshing = refreshing;
                             } else {
                                 window.reuse_paint(element_state.paint_range.clone());
                             }
@@ -508,5 +510,90 @@ pub struct EmptyView;
 impl Render for EmptyView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         Empty
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use crate::{
+        Context, Entity, StyleRefinement, TestAppContext, Window, div, prelude::*, px, size,
+    };
+
+    struct Leaf {
+        renders: Rc<Cell<usize>>,
+    }
+
+    impl Render for Leaf {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            self.renders.set(self.renders.get() + 1);
+            div().size_full()
+        }
+    }
+
+    struct Middle {
+        leaf: Entity<Leaf>,
+        renders: Rc<Cell<usize>>,
+    }
+
+    impl Render for Middle {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            self.renders.set(self.renders.get() + 1);
+            div().size_full().child(
+                self.leaf
+                    .clone()
+                    .cached(StyleRefinement::default().size_full()),
+            )
+        }
+    }
+
+    struct Root {
+        middle: Entity<Middle>,
+    }
+
+    impl Render for Root {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(
+                self.middle
+                    .clone()
+                    .cached(StyleRefinement::default().size_full()),
+            )
+        }
+    }
+
+    /// A cached view inside another one is reused when only the outer one renders again.
+    #[gpui::test]
+    fn test_nested_cached_view_is_reused(cx: &mut TestAppContext) {
+        let (middle_renders, leaf_renders) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+        let (m, l) = (middle_renders.clone(), leaf_renders.clone());
+        let window = cx.open_window(size(px(800.), px(600.)), move |_, cx| {
+            let leaf = cx.new(|_| Leaf { renders: l });
+            let middle = cx.new(|_| Middle { leaf, renders: m });
+            Root { middle }
+        });
+        cx.run_until_parked();
+        assert_eq!((middle_renders.get(), leaf_renders.get()), (1, 1));
+
+        window
+            .update(cx, |root, _, cx| {
+                root.middle.update(cx, |_, cx| cx.notify())
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!((middle_renders.get(), leaf_renders.get()), (2, 1));
+
+        window
+            .update(cx, |root, _, cx| {
+                let leaf = root.middle.read(cx).leaf.clone();
+                leaf.update(cx, |_, cx| cx.notify());
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!((middle_renders.get(), leaf_renders.get()), (3, 2));
+
+        window.update(cx, |_, window, _| window.refresh()).unwrap();
+        cx.run_until_parked();
+        assert_eq!((middle_renders.get(), leaf_renders.get()), (4, 3));
     }
 }
